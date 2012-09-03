@@ -1,0 +1,235 @@
+ContentDB - content based database for a set of files
+
+= Purpose =
+In case of large set of (large) files, it is hard to determine if a file already exits in the set, or not, especially if the file might have been renamed. fslint can help in this case, because it is able to detect duplicate files, but it is very inefficient to rerun it every time when a file needs to be found in the set.
+
+In order to solve this problem, contentDB manages a very simple, text-based database with the file names and SHA1 hashes of the files, so searching for a given content inside the set is efficient.
+
+= Implementation =
+
+Currently this "application" consists of 4 shell scripts:
+ * content-db-init
+ * content-db-add
+ * content-db-add-dir
+ * content-db-find
+
+The listing of each script can be found below.
+
+== content-db-init ==
+
+{{{
+#!sh
+#!/bin/sh
+
+# content-db-init path
+#
+# initialize a content-db database
+# if database already exists, then it is not changed
+#
+if [ $# != 1 ] ; then
+  echo "1 parameter is expected, got " $#
+  echo "usage:" $0 " path-where-to-created-database"
+  exit 1
+fi
+
+touch $1/.contentdb
+}}}
+
+== content-db-add ==
+
+{{{
+#!sh
+#!/bin/bash
+
+# content-db-add file1 file2 ...
+#
+#   add files to a content-db
+#
+# 1. find database files
+#   1.1 if not found, return with error
+# 1.2 check for the existance of the input files
+# 2. for each input file
+#   2.1 hash the file
+#   2.2 add hash and filename to .contentdb-hash file
+#
+
+# 0. debug
+
+function debug {
+    echo "$@"
+    dummy=1
+}
+
+for i in "$*" ; do
+    echo $i
+done
+
+# 1. find DB
+
+DB_PATH=$( pwd )
+
+debug "DB_PATH = " "$DB_PATH"
+
+while ! ( [ -e $DB_PATH/.contentdb ] ) ; do
+
+    # 1.1 check if it is not found
+    if [ "$DB_PATH" == "/" ]; then
+        echo "Can't find database!"
+        exit 1
+    fi
+    DB_PATH=$( readlink -f $DB_PATH/.. )
+    debug "in loop: " $DB_PATH
+done
+
+debug "DB_PATH found =" "$DB_PATH"
+
+# 1.2 check if each input file exists
+for infile in "$@" ; do
+  debug "infile: " $infile
+  if ! [ -e "$infile" ] ; then
+    echo "input file " $infile " doesn't exist!"
+    exit 2
+  fi
+  if ! [ -f "$infile" ] ; then
+    echo "input file " $infile " is not a regular file!"
+    exit 3
+  fi
+  if ! [ -r "$infile" ] ; then
+    echo "input file " $infile " is not readable!"
+    exit 4
+  fi
+done
+
+
+file_ok="y"
+
+function check_file {
+    if [ -e "$DB_PATH/.contentdb-ignore" ] ; then
+        debug "ignore file found"
+        while read expression ; do
+#            if [[ "$(basename "$1")" = $expression ]] ; then
+            if [[ "$1" = $expression ]] ; then
+                debug "file not ok, matched " "$expression"
+                file_ok="n"
+                return
+            fi
+            echo "$expression"
+        done < "$DB_PATH"/.contentdb-ignore
+        debug "file ok, not matched anything"
+    fi
+    file_ok="y"
+}
+
+# 2.0
+for infile in "$@" ; do
+    # 2.09 check if the file is allowed to be added
+    check_file "$infile"
+    if [ $file_ok = "y" ] ; then
+        # 2.1 hash the file
+        hash_and_name=$( sha1sum "$(readlink -f "$infile")" )
+        # TODO replace absolute path with a path relative to the .contentdb file
+        #       location
+        debug "line: " "$hash_and_name"
+        # 2.2 check if the hash and filename already is in the database
+        found=$( grep "$hash_and_name" $DB_PATH/.contentdb )
+        if [ "$found" = "" ] ; then
+            debug "file not in db, adding"
+            # 2.3 add hash and filename to .contentdb-hash file
+            echo "$hash_and_name" >> $DB_PATH/.contentdb
+        else
+            debug "file in db, not adding again"
+        fi
+    fi # file_ok
+done
+
+debug "done!"
+}}}
+
+== content-db-add-dir ==
+
+{{{
+#!sh
+#!/bin/sh
+
+# content-db-add-dir dir1 dir2 dir3 ...
+#   add directories to content-db, recursively
+
+for DIR in $@ ; do
+    find $DIR -type f  \( ! -regex '.*/\..*' \) -exec content-db-add {} \;
+#    find $DIR -type f -exec ls {} ;
+done
+}}}
+
+== content-db-find ==
+
+{{{
+#!sh
+#!/bin/sh
+
+# content-db-find [--db database-directory] file1 file2 ...
+#  find files in a database
+#
+
+# 0. debug
+
+function debug {
+    echo $@
+    dummy=1
+}
+
+# 1. find db
+
+DB_PATH=""
+
+IGNORE_FIRST_2_ARGS="n"
+
+if [ $1 == "--db" ] ; then
+    # 1.1 db specified on command line
+    if [ -f $2/.contentdb ] ; then
+        DB_PATH=$2
+        debug "db path as specified:" $DB_PATH
+    else
+        echo "at specified path, " $2 ", no .contentdb file exists"
+        exit 1
+    fi
+    IGNORE_FIRST_2_ARGS="y"
+else
+    # 1.2 db search
+
+    DB_PATH=$( pwd )
+
+    debug "DB_PATH = " $DB_PATH
+
+    while ! ( [ -e $DB_PATH/.contentdb ] ) ; do
+
+        # 1.1 check if it is not found
+        if [ $DB_PATH == "/" ]; then
+            echo "Can't find database!"
+            exit 1
+        fi
+        DB_PATH=$( readlink -f $DB_PATH/.. )
+        debug "in loop: " $DB_PATH
+    done
+
+    debug "DB_PATH found =" $DB_PATH
+
+
+fi
+
+# 2.0 for each input file...
+
+NR=1
+for infile in "$@" ; do
+    debug "arg: " $infile
+    if [ $IGNORE_FIRST_2_ARGS = "n" ] || [ $NR -ge 3 ] ; then
+        # process the file
+        debug "file input: " $infile
+        # 2.1 hash the file
+        HASH=$( sha1sum $infile | awk '{print $1}')
+        # 2.2 grep through the database
+        grep $HASH $DB_PATH/.contentdb
+    fi
+    let NR=NR+1
+    debug "nr = " $NR
+done
+}}}
